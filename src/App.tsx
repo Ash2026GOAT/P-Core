@@ -127,19 +127,21 @@ export default function App() {
     }
   };
 
-  const handleSendMessage = async (rawContent: string) => {
+  const handleSendMessage = async (rawContent: string, attachedImages?: ChatMessage['images']) => {
     const content = rawContent.trim();
-    if (!content || isGeneratingRef.current) return;
+    const images = attachedImages && attachedImages.length > 0 ? attachedImages : undefined;
+    if ((!content && !images) || isGeneratingRef.current) return;
 
     const now = Date.now();
     let targetChatId = activeChatId;
     let existingMessages: ChatMessage[] = [];
+    const fallbackTitle = content || (images ? 'Image Analysis' : 'New Conversation');
 
     if (!targetChatId || !chats.some((c) => c.id === targetChatId)) {
       targetChatId = createChatId();
       const newSession: ChatSession = {
         id: targetChatId,
-        title: deriveChatTitle(content),
+        title: deriveChatTitle(fallbackTitle),
         modelId: selectedModelId,
         messages: [],
         createdAt: now,
@@ -156,6 +158,7 @@ export default function App() {
       id: createChatId(),
       role: 'user',
       content,
+      images,
       createdAt: now,
     };
 
@@ -177,7 +180,7 @@ export default function App() {
           const isFirstTurn = c.messages.length === 0;
           return {
             ...c,
-            title: isFirstTurn ? deriveChatTitle(content) : c.title,
+            title: isFirstTurn ? deriveChatTitle(fallbackTitle) : c.title,
             modelId: selectedModelId,
             messages: updatedMessages,
             updatedAt: now,
@@ -200,12 +203,17 @@ export default function App() {
     try {
       const historyPayload = [
         ...existingMessages
-          .filter((m) => !m.isError && m.content.trim().length > 0)
+          .filter((m) => !m.isError && (m.content.trim().length > 0 || (m.images && m.images.length > 0)))
           .map((m) => ({
             role: m.role === 'user' ? ('user' as const) : ('model' as const),
             content: m.content,
+            images: m.images?.map((img) => ({ data: img.data, mimeType: img.mimeType })),
           })),
-        { role: 'user' as const, content },
+        {
+          role: 'user' as const,
+          content,
+          images: images?.map((img) => ({ data: img.data, mimeType: img.mimeType })),
+        },
       ];
 
       const response = await fetch('/api/chat', {
