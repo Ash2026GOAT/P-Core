@@ -4,6 +4,25 @@ import type { ChatSession } from '../types/chat';
 const CHATS_STORAGE_KEY = 'localmind_chats_v1';
 const ACTIVE_CHAT_KEY = 'localmind_active_chat_v1';
 const SELECTED_MODEL_KEY = 'localmind_selected_model_v1';
+const JARVIS_VOICE_KEY = 'pcore_jarvis_voice_v1';
+
+export function loadJarvisEnabled(): boolean {
+  try {
+    const saved = window.localStorage.getItem(JARVIS_VOICE_KEY);
+    if (saved === null) return true;
+    return saved === 'true';
+  } catch {
+    return true;
+  }
+}
+
+export function saveJarvisEnabled(enabled: boolean): void {
+  try {
+    window.localStorage.setItem(JARVIS_VOICE_KEY, String(enabled));
+  } catch {
+    // Ignore storage errors
+  }
+}
 
 export function loadChats(): ChatSession[] {
   try {

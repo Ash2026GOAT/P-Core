@@ -3,21 +3,32 @@ import {
   ArrowUp,
   ImagePlus,
   Loader2,
+  Mic,
+  MicOff,
   Square,
   Terminal,
+  Volume2,
   X,
   Zap,
 } from 'lucide-react';
 import type { ChatMessage, ImageAttachment } from '../types/chat';
 import { getModelOption, STARTER_PROMPTS } from '../config/models';
+import {
+  getSpeechRecognitionConstructor,
+  type SpeechRecognitionInstance,
+} from '../services/speech';
 import { MarkdownRenderer } from './MarkdownRenderer';
 
 interface ChatAreaProps {
   messages: ChatMessage[];
   selectedModelId: string;
   isGenerating: boolean;
+  speakingMessageId: string | null;
+  speechSupported: boolean;
   onSendMessage: (content: string, images?: ImageAttachment[]) => void;
   onStopGeneration: () => void;
+  onSpeakMessage: (messageId: string, content: string) => void;
+  onStopSpeaking: () => void;
 }
 
 const MAX_IMAGES_PER_MESSAGE = 4;
@@ -54,18 +65,30 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   messages,
   selectedModelId,
   isGenerating,
+  speakingMessageId,
+  speechSupported,
   onSendMessage,
   onStopGeneration,
+  onSpeakMessage,
+  onStopSpeaking,
 }) => {
   const [input, setInput] = useState('');
   const [pendingImages, setPendingImages] = useState<ImageAttachment[]>([]);
   const [uploadError, setUploadError] = useState<string | null>(null);
   const [isDragging, setIsDragging] = useState(false);
 
+  const [isListening, setIsListening] = useState(false);
+  const [micError, setMicError] = useState<string | null>(null);
+
   const scrollContainerRef = useRef<HTMLDivElement>(null);
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const shouldAutoScrollRef = useRef(true);
+
+  const recognitionRef = useRef<SpeechRecognitionInstance | null>(null);
+  const baseInputRef = useRef('');
+  const inputRef = useRef('');
+  inputRef.current = input;
 
   const selectedModel = getModelOption(selectedModelId);
 
@@ -90,6 +113,101 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     el.style.height = 'auto';
     el.style.height = `${Math.min(el.scrollHeight, 180)}px`;
   }, [input]);
+
+  // Clean up speech recognition on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try {
+          recognitionRef.current.abort();
+        } catch {
+          // Ignore cleanup error
+        }
+        recognitionRef.current = null;
+      }
+    };
+  }, []);
+
+  const stopListening = () => {
+    if (recognitionRef.current) {
+      try {
+        recognitionRef.current.stop();
+      } catch {
+        // Ignore stop errors
+      }
+      recognitionRef.current = null;
+    }
+    setIsListening(false);
+  };
+
+  const toggleListening = () => {
+    setMicError(null);
+
+    if (isListening) {
+      stopListening();
+      return;
+    }
+
+    const RecognitionCtor = getSpeechRecognitionConstructor();
+    if (!RecognitionCtor) {
+      setMicError('Voice input requires Chrome or Edge with SpeechRecognition support.');
+      return;
+    }
+
+    try {
+      const recognition = new RecognitionCtor();
+      recognition.continuous = true;
+      recognition.interimResults = true;
+      recognition.lang = navigator.language || 'en-US';
+
+      baseInputRef.current = inputRef.current.trimEnd();
+
+      recognition.onstart = () => {
+        setIsListening(true);
+      };
+
+      recognition.onresult = (event) => {
+        let finalTranscript = '';
+        let interimTranscript = '';
+
+        for (let i = 0; i < event.results.length; i++) {
+          const result = event.results[i];
+          const text = result[0]?.transcript ?? '';
+          if (result.isFinal) {
+            finalTranscript += text;
+          } else {
+            interimTranscript += text;
+          }
+        }
+
+        const spoken = `${finalTranscript}${interimTranscript}`.trim();
+        const prefix = baseInputRef.current;
+        const combined = prefix ? (spoken ? `${prefix} ${spoken}` : prefix) : spoken;
+        setInput(combined);
+      };
+
+      recognition.onerror = (event) => {
+        if (event.error === 'not-allowed' || event.error === 'service-not-allowed') {
+          setMicError('Microphone permission denied. Please allow mic access in Chrome.');
+        } else if (event.error !== 'no-speech' && event.error !== 'aborted') {
+          setMicError(`Voice input error: ${event.error}`);
+        }
+        setIsListening(false);
+        recognitionRef.current = null;
+      };
+
+      recognition.onend = () => {
+        setIsListening(false);
+        recognitionRef.current = null;
+      };
+
+      recognitionRef.current = recognition;
+      recognition.start();
+    } catch (err) {
+      setMicError(err instanceof Error ? err.message : 'Unable to start voice recognition.');
+      setIsListening(false);
+    }
+  };
 
   const attachImageFiles = async (files: File[]) => {
     setUploadError(null);
@@ -141,7 +259,6 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
     }
 
     if (pastedImages.length > 0) {
-      // Allow text paste too if clipboard also contains text, otherwise prevent raw image filename insertion
       const hasText = items.some((item) => item.kind === 'string' && item.type === 'text/plain');
       if (!hasText) {
         e.preventDefault();
@@ -177,6 +294,9 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
   };
 
   const handleSubmit = () => {
+    if (isListening) {
+      stopListening();
+    }
     const trimmed = input.trim();
     if ((!trimmed && pendingImages.length === 0) || isGenerating) return;
     shouldAutoScrollRef.current = true;
@@ -275,6 +395,7 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               const isUser = msg.role === 'user';
               const isLastMessage = idx === messages.length - 1;
               const isStreamingThis = !isUser && isGenerating && isLastMessage;
+              const isSpeakingThis = !isUser && speakingMessageId === msg.id;
               const modelLabel = msg.modelId ? getModelOption(msg.modelId).shortName : selectedModel.shortName;
 
               if (isUser) {
@@ -304,16 +425,60 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
 
               return (
                 <div key={msg.id} className="flex flex-col">
-                  <div className="mb-1.5 flex items-center gap-2 text-xs text-slate-400">
-                    <span className="font-medium text-slate-200">{modelLabel}</span>
-                    {isStreamingThis && (
-                      <>
-                        <span aria-hidden="true">·</span>
-                        <span className="inline-flex items-center gap-1.5 text-blue-400">
-                          <Loader2 className="h-3 w-3 animate-spin" />
-                          Streaming
-                        </span>
-                      </>
+                  <div className="mb-1.5 flex items-center justify-between gap-2 text-xs text-slate-400">
+                    <div className="flex items-center gap-2">
+                      <span className="font-medium text-slate-200">{modelLabel}</span>
+                      {isStreamingThis && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1.5 text-blue-400">
+                            <Loader2 className="h-3 w-3 animate-spin" />
+                            Streaming
+                          </span>
+                        </>
+                      )}
+                      {isSpeakingThis && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="inline-flex items-center gap-1.5 text-cyan-300">
+                            Speaking
+                          </span>
+                        </>
+                      )}
+                    </div>
+
+                    {!isStreamingThis && !msg.isError && msg.content && speechSupported && (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          isSpeakingThis
+                            ? onStopSpeaking()
+                            : onSpeakMessage(msg.id, msg.content)
+                        }
+                        aria-label={
+                          isSpeakingThis
+                            ? 'Stop speaking response'
+                            : 'Speak response with J.A.R.V.I.S. voice'
+                        }
+                        title={isSpeakingThis ? 'Stop speaking' : 'Listen with J.A.R.V.I.S. voice'}
+                        className={`inline-flex h-7 items-center gap-1.5 rounded-md border px-2 text-[11px] font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 whitespace-nowrap shrink-0 ${
+                          isSpeakingThis
+                            ? 'border-cyan-400/60 bg-cyan-500/15 text-cyan-200 hover:bg-cyan-500/25'
+                            : 'border-slate-800 bg-[#141925] text-slate-400 hover:border-cyan-500/40 hover:text-cyan-300'
+                        }`}
+                      >
+                        {isSpeakingThis ? (
+                          <>
+                            <Square className="h-3 w-3 fill-current" />
+                            <span>Stop</span>
+                          </>
+                        ) : (
+                          <>
+                            <Volume2 className="h-3.5 w-3.5" />
+                            <span>Speak</span>
+                          </>
+                        )}
+                      </button>
                     )}
                   </div>
 
@@ -358,9 +523,38 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
             onDragLeave={handleDragLeave}
             onDrop={handleDrop}
             className={`rounded-xl border bg-[#111620] p-2 transition-colors focus-within:border-blue-500/60 ${
-              isDragging ? 'border-blue-500 bg-[#151C2B]' : 'border-slate-800'
+              isListening
+                ? 'border-cyan-400/70 shadow-[0_0_24px_rgba(34,211,238,0.14)]'
+                : isDragging
+                  ? 'border-blue-500 bg-[#151C2B]'
+                  : 'border-slate-800'
             }`}
           >
+            {/* Listening Cyan Waveform Banner */}
+            {isListening && (
+              <div className="mb-2 flex items-center justify-between gap-3 border-b border-cyan-500/20 px-2 pb-2 pt-0.5">
+                <div className="flex items-center gap-2.5">
+                  <div className="flex h-4 items-center gap-0.5" aria-hidden="true">
+                    <span className="animate-jarvis-wave h-3 w-0.5 rounded-full bg-cyan-400" style={{ animationDelay: '0ms' }} />
+                    <span className="animate-jarvis-wave h-4 w-0.5 rounded-full bg-cyan-300" style={{ animationDelay: '150ms' }} />
+                    <span className="animate-jarvis-wave h-2.5 w-0.5 rounded-full bg-cyan-400" style={{ animationDelay: '300ms' }} />
+                    <span className="animate-jarvis-wave h-4 w-0.5 rounded-full bg-cyan-300" style={{ animationDelay: '450ms' }} />
+                    <span className="animate-jarvis-wave h-3 w-0.5 rounded-full bg-cyan-400" style={{ animationDelay: '600ms' }} />
+                  </div>
+                  <span className="font-mono text-xs font-medium text-cyan-300">
+                    Listening… Speak naturally into your microphone
+                  </span>
+                </div>
+                <button
+                  type="button"
+                  onClick={stopListening}
+                  className="rounded px-2 py-0.5 text-[11px] font-medium text-cyan-200 transition-colors hover:bg-cyan-500/20 whitespace-nowrap"
+                >
+                  Done
+                </button>
+              </div>
+            )}
+
             {/* Removable Image Thumbnail Preview Row above Textarea */}
             {pendingImages.length > 0 && (
               <div className="mb-2 flex flex-wrap items-center gap-2.5 border-b border-slate-800/80 px-1.5 pb-2.5 pt-1">
@@ -389,8 +583,8 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
               </div>
             )}
 
-            {uploadError && (
-              <p className="mb-2 px-2 text-xs text-rose-400">{uploadError}</p>
+            {(uploadError || micError) && (
+              <p className="mb-2 px-2 text-xs text-rose-400">{uploadError || micError}</p>
             )}
 
             <div className="flex items-end gap-2">
@@ -413,6 +607,33 @@ export const ChatArea: React.FC<ChatAreaProps> = ({
                 className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border border-slate-800 bg-[#161C28] text-slate-300 transition-colors hover:border-slate-700 hover:bg-[#1B2230] hover:text-white focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <ImagePlus className="h-4 w-4" />
+              </button>
+
+              {/* Glowing Cyan Microphone Button */}
+              <button
+                type="button"
+                disabled={isGenerating}
+                onClick={toggleListening}
+                aria-pressed={isListening}
+                aria-label={isListening ? 'Stop voice input' : 'Start voice input'}
+                title={isListening ? 'Stop listening' : 'Speak into P-Core'}
+                className={`relative inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-lg border transition-all focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  isListening
+                    ? 'border-cyan-400 bg-cyan-500/20 text-cyan-200 shadow-[0_0_20px_rgba(34,211,238,0.5)]'
+                    : 'border-cyan-500/40 bg-cyan-950/30 text-cyan-300 shadow-[0_0_12px_rgba(34,211,238,0.2)] hover:border-cyan-400/70 hover:bg-cyan-900/40 hover:text-cyan-100 hover:shadow-[0_0_16px_rgba(34,211,238,0.35)]'
+                }`}
+              >
+                {isListening && (
+                  <span
+                    aria-hidden="true"
+                    className="pointer-events-none absolute inset-0 animate-ping rounded-lg border border-cyan-400/60"
+                  />
+                )}
+                {isListening ? (
+                  <MicOff className="relative z-10 h-4 w-4 text-cyan-200" />
+                ) : (
+                  <Mic className="relative z-10 h-4 w-4" />
+                )}
               </button>
 
               <textarea

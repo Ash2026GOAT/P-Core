@@ -1,16 +1,23 @@
-import { useEffect, useRef, useState } from 'react';
-import { PanelLeft, Plus } from 'lucide-react';
+import { useCallback, useEffect, useRef, useState } from 'react';
+import { PanelLeft, Plus, Square, Volume2, VolumeX } from 'lucide-react';
 import type { ChatMessage, ChatSession } from './types/chat';
 import {
   createChatId,
   deriveChatTitle,
   loadActiveChatId,
   loadChats,
+  loadJarvisEnabled,
   loadSelectedModelId,
   saveActiveChatId,
   saveChats,
+  saveJarvisEnabled,
   saveSelectedModelId,
 } from './services/storage';
+import {
+  selectJarvisVoice,
+  splitIntoSpeechChunks,
+  stripMarkdownForSpeech,
+} from './services/speech';
 import { Sidebar } from './components/Sidebar';
 import { ModelSelector } from './components/ModelSelector';
 import { ChatArea } from './components/ChatArea';
@@ -40,10 +47,20 @@ export default function App() {
   const [isGenerating, setIsGenerating] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(true);
 
+  const [jarvisEnabled, setJarvisEnabled] = useState<boolean>(() => loadJarvisEnabled());
+  const [speakingMessageId, setSpeakingMessageId] = useState<string | null>(null);
+  const [availableVoices, setAvailableVoices] = useState<SpeechSynthesisVoice[]>([]);
+
   const isGeneratingRef = useRef(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const jarvisEnabledRef = useRef(jarvisEnabled);
+  jarvisEnabledRef.current = jarvisEnabled;
+  const speechSessionRef = useRef(0);
 
-  // Sync chats, activeChatId, and selectedModelId to localStorage
+  const speechSupported =
+    typeof window !== 'undefined' && 'speechSynthesis' in window;
+
+  // Sync chats, activeChatId, selectedModelId, and jarvisEnabled to localStorage
   useEffect(() => {
     saveChats(chats);
   }, [chats]);
@@ -56,12 +73,112 @@ export default function App() {
     saveSelectedModelId(selectedModelId);
   }, [selectedModelId]);
 
+  useEffect(() => {
+    saveJarvisEnabled(jarvisEnabled);
+  }, [jarvisEnabled]);
+
   // Collapse sidebar automatically on narrow viewports initially
   useEffect(() => {
     if (window.innerWidth < 1024) {
       setSidebarOpen(false);
     }
   }, []);
+
+  // Load browser speech synthesis voices (async in Chrome)
+  useEffect(() => {
+    if (!speechSupported) return;
+
+    const updateVoices = () => {
+      const voices = window.speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        setAvailableVoices(voices);
+      }
+    };
+
+    updateVoices();
+    window.speechSynthesis.addEventListener?.('voiceschanged', updateVoices);
+
+    return () => {
+      window.speechSynthesis.removeEventListener?.('voiceschanged', updateVoices);
+      speechSessionRef.current += 1;
+      window.speechSynthesis.cancel();
+    };
+  }, [speechSupported]);
+
+  const stopSpeaking = useCallback(() => {
+    speechSessionRef.current += 1;
+    setSpeakingMessageId(null);
+    if (speechSupported) {
+      window.speechSynthesis.cancel();
+    }
+  }, [speechSupported]);
+
+  const speakMessage = useCallback(
+    (messageId: string, rawMarkdown: string) => {
+      if (!speechSupported) return;
+
+      const cleanText = stripMarkdownForSpeech(rawMarkdown);
+      if (!cleanText) return;
+
+      const chunks = splitIntoSpeechChunks(cleanText);
+      if (chunks.length === 0) return;
+
+      speechSessionRef.current += 1;
+      const currentSession = speechSessionRef.current;
+
+      window.speechSynthesis.cancel();
+      setSpeakingMessageId(messageId);
+
+      const voices =
+        availableVoices.length > 0
+          ? availableVoices
+          : window.speechSynthesis.getVoices();
+      const jarvisVoice = selectJarvisVoice(voices);
+
+      const speakNextChunk = (index: number) => {
+        if (speechSessionRef.current !== currentSession) return;
+        if (index >= chunks.length) {
+          setSpeakingMessageId(null);
+          return;
+        }
+
+        const utterance = new SpeechSynthesisUtterance(chunks[index]);
+        if (jarvisVoice) {
+          utterance.voice = jarvisVoice;
+          utterance.lang = jarvisVoice.lang;
+        } else {
+          utterance.lang = 'en-GB';
+        }
+        utterance.pitch = 0.94;
+        utterance.rate = 1.04;
+
+        utterance.onend = () => {
+          if (speechSessionRef.current !== currentSession) return;
+          speakNextChunk(index + 1);
+        };
+
+        utterance.onerror = () => {
+          if (speechSessionRef.current !== currentSession) return;
+          setSpeakingMessageId(null);
+        };
+
+        window.speechSynthesis.speak(utterance);
+      };
+
+      speakNextChunk(0);
+    },
+    [availableVoices, speechSupported]
+  );
+
+  const handleToggleJarvis = () => {
+    setJarvisEnabled((prev) => {
+      const next = !prev;
+      if (!next) {
+        stopSpeaking();
+      }
+      return next;
+    });
+  };
 
   const handleSelectModel = (modelId: string) => {
     if (isGeneratingRef.current) return;
@@ -75,6 +192,7 @@ export default function App() {
 
   const handleNewChat = () => {
     if (isGeneratingRef.current) return;
+    stopSpeaking();
     const newId = createChatId();
     const now = Date.now();
     const newChat: ChatSession = {
@@ -91,6 +209,7 @@ export default function App() {
 
   const handleSelectChat = (chatId: string) => {
     if (isGeneratingRef.current) return;
+    stopSpeaking();
     setActiveChatId(chatId);
     const target = chats.find((c) => c.id === chatId);
     if (target?.modelId && (target.modelId === 'gemini-4-hydrogen' || target.modelId === 'gemini-3.1-flash-lite')) {
@@ -99,6 +218,9 @@ export default function App() {
   };
 
   const handleDeleteChat = (chatId: string) => {
+    if (activeChatId === chatId) {
+      stopSpeaking();
+    }
     setChats((prev) => {
       const next = prev.filter((c) => c.id !== chatId);
       if (activeChatId === chatId) {
@@ -116,6 +238,7 @@ export default function App() {
 
   const handleClearAllChats = () => {
     if (isGeneratingRef.current) return;
+    stopSpeaking();
     setChats([]);
     setActiveChatId(null);
   };
@@ -131,6 +254,8 @@ export default function App() {
     const content = rawContent.trim();
     const images = attachedImages && attachedImages.length > 0 ? attachedImages : undefined;
     if ((!content && !images) || isGeneratingRef.current) return;
+
+    stopSpeaking();
 
     const now = Date.now();
     let targetChatId = activeChatId;
@@ -335,6 +460,10 @@ export default function App() {
               }
         )
       );
+
+      if (jarvisEnabledRef.current) {
+        speakMessage(assistantMsgId, accumulated);
+      }
     } catch (err) {
       const isAbort = err instanceof DOMException && err.name === 'AbortError';
       if (isAbort) {
@@ -402,7 +531,7 @@ export default function App() {
 
       <div className="flex min-w-0 flex-1 flex-col">
         {/* Top Bar */}
-        <header className="flex h-14 shrink-0 items-center justify-between gap-4 border-b border-slate-800/80 bg-[#0E121A] px-4 sm:px-5">
+        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-800/80 bg-[#0E121A] px-4 sm:px-5">
           <div className="flex min-w-0 items-center gap-3">
             <button
               type="button"
@@ -417,7 +546,51 @@ export default function App() {
             </span>
           </div>
 
-          <div className="flex items-center gap-2.5 shrink-0">
+          <div className="flex items-center gap-2 shrink-0">
+            {speechSupported && (
+              <>
+                {speakingMessageId !== null && (
+                  <button
+                    type="button"
+                    onClick={stopSpeaking}
+                    aria-label="Stop J.A.R.V.I.S. speech"
+                    className="inline-flex h-10 items-center gap-1.5 rounded-lg border border-rose-500/50 bg-rose-950/40 px-3 text-xs font-medium text-rose-200 transition-colors hover:bg-rose-900/50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-400 whitespace-nowrap shrink-0"
+                  >
+                    <Square className="h-3 w-3 fill-current" />
+                    <span>Stop</span>
+                  </button>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleToggleJarvis}
+                  aria-pressed={jarvisEnabled}
+                  aria-label={
+                    jarvisEnabled
+                      ? 'Disable J.A.R.V.I.S. auto-voice'
+                      : 'Enable J.A.R.V.I.S. auto-voice'
+                  }
+                  title={
+                    jarvisEnabled
+                      ? 'J.A.R.V.I.S. Voice ON — Replies spoken aloud'
+                      : 'J.A.R.V.I.S. Voice OFF'
+                  }
+                  className={`inline-flex h-10 items-center gap-2 rounded-lg border px-3 text-xs font-medium transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-cyan-400 whitespace-nowrap shrink-0 ${
+                    jarvisEnabled
+                      ? 'border-cyan-500/50 bg-cyan-950/35 text-cyan-200 shadow-[0_0_14px_rgba(34,211,238,0.16)] hover:border-cyan-400/70 hover:bg-cyan-900/40'
+                      : 'border-slate-800 bg-[#161C28] text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                  }`}
+                >
+                  {jarvisEnabled ? (
+                    <Volume2 className="h-4 w-4 text-cyan-300 shrink-0" />
+                  ) : (
+                    <VolumeX className="h-4 w-4 text-slate-500 shrink-0" />
+                  )}
+                  <span className="hidden sm:inline">J.A.R.V.I.S. Voice</span>
+                </button>
+              </>
+            )}
+
             <ModelSelector
               selectedModelId={selectedModelId}
               isGenerating={isGenerating}
@@ -441,8 +614,12 @@ export default function App() {
           messages={activeChat?.messages ?? []}
           selectedModelId={selectedModelId}
           isGenerating={isGenerating}
+          speakingMessageId={speakingMessageId}
+          speechSupported={speechSupported}
           onSendMessage={handleSendMessage}
           onStopGeneration={handleStopGeneration}
+          onSpeakMessage={speakMessage}
+          onStopSpeaking={stopSpeaking}
         />
       </div>
     </div>
