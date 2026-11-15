@@ -1,0 +1,234 @@
+@import "tailwindcss";
+@custom-variant dark (&:where(.dark, .dark *));
+
+@theme {
+  --font-display: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-sans: "DM Sans", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+}
+
+@layer base {
+  html {
+    font-family: var(--font-sans);
+    color-scheme: dark;
+  }
+
+  h1, h2, h3, h4, .font-display {
+    font-family: var(--font-display);
+  }
+
+  code, pre, .font-mono {
+    font-family: var(--font-mono);
+  }
+}
+
+/* Custom sleek dark scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+::-webkit-scrollbar-thumb {
+  background: rgba(148, 163, 184, 0.18);
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: rgba(148, 163, 184, 0.32);
+}
+
+/* Markdown & Syntax Highlighting (Dark IDE palette) */
+.markdown-prose {
+  font-size: 0.9375rem;
+  line-height: 1.65;
+  color: #E2E8F0;
+  word-wrap: break-word;
+}
+
+.markdown-prose > *:first-child {
+  margin-top: 0;
+}
+
+.markdown-prose > *:last-child {
+  margin-bottom: 0;
+}
+
+.markdown-prose p {
+  margin-top: 0.75em;
+  margin-bottom: 0.75em;
+}
+
+.markdown-prose h1,
+.markdown-prose h2,
+.markdown-prose h3,
+.markdown-prose h4 {
+  font-family: var(--font-display);
+  font-weight: 600;
+  color: #F8FAFC;
+  margin-top: 1.25em;
+  margin-bottom: 0.5em;
+  line-height: 1.3;
+}
+
+.markdown-prose h1 { font-size: 1.375rem; }
+.markdown-prose h2 { font-size: 1.1875rem; }
+.markdown-prose h3 { font-size: 1.0625rem; }
+
+.markdown-prose ul,
+.markdown-prose ol {
+  margin-top: 0.625em;
+  margin-bottom: 0.625em;
+  padding-left: 1.5rem;
+}
+
+.markdown-prose ul {
+  list-style-type: disc;
+}
+
+.markdown-prose ol {
+  list-style-type: decimal;
+}
+
+.markdown-prose li {
+  margin-top: 0.25em;
+  margin-bottom: 0.25em;
+}
+
+.markdown-prose li::marker {
+  color: #64748B;
+}
+
+.markdown-prose a {
+  color: #60A5FA;
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+
+.markdown-prose a:hover {
+  color: #93C5FD;
+}
+
+.markdown-prose blockquote {
+  margin: 0.875em 0;
+  padding: 0.75rem 1rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.55);
+  color: #CBD5E1;
+}
+
+.markdown-prose hr {
+  margin: 1.25em 0;
+  border: 0;
+  border-top: 1px solid rgba(148, 163, 184, 0.16);
+}
+
+.markdown-prose table {
+  width: 100%;
+  border-collapse: collapse;
+  margin: 1em 0;
+  font-size: 0.875rem;
+  font-variant-numeric: tabular-nums;
+}
+
+.markdown-prose th,
+.markdown-prose td {
+  padding: 0.5rem 0.75rem;
+  border: 1px solid rgba(148, 163, 184, 0.16);
+  text-align: left;
+}
+
+.markdown-prose th {
+  background: rgba(30, 41, 59, 0.7);
+  font-weight: 600;
+  color: #F1F5F9;
+}
+
+.markdown-prose :not(pre) > code {
+  font-size: 0.85em;
+  padding: 0.15em 0.4em;
+  border-radius: 0.375rem;
+  background: rgba(30, 41, 59, 0.85);
+  border: 1px solid rgba(148, 163, 184, 0.15);
+  color: #93C5FD;
+}
+
+/* Highlight.js dark theme tokens */
+.hljs {
+  color: #E2E8F0;
+  background: transparent;
+}
+
+.hljs-comment,
+.hljs-quote {
+  color: #64748B;
+  font-style: italic;
+}
+
+.hljs-keyword,
+.hljs-selector-tag,
+.hljs-addition {
+  color: #C084FC;
+}
+
+.hljs-number,
+.hljs-string,
+.hljs-meta .hljs-meta-string,
+.hljs-literal,
+.hljs-doctag,
+.hljs-regexp {
+  color: #34D399;
+}
+
+.hljs-title,
+.hljs-section,
+.hljs-name,
+.hljs-selector-id,
+.hljs-selector-class {
+  color: #60A5FA;
+}
+
+.hljs-attribute,
+.hljs-attr,
+.hljs-variable,
+.hljs-template-variable,
+.hljs-class .hljs-title,
+.hljs-type {
+  color: #FBBF24;
+}
+
+.hljs-symbol,
+.hljs-bullet,
+.hljs-subst,
+.hljs-meta,
+.hljs-meta .hljs-keyword,
+.hljs-selector-attr,
+.hljs-selector-pseudo,
+.hljs-link {
+  color: #38BDF8;
+}
+
+.hljs-built_in,
+.hljs-deletion {
+  color: #F87171;
+}
+
+.hljs-emphasis {
+  font-style: italic;
+}
+
+.hljs-strong {
+  font-weight: 600;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+  }
+}
