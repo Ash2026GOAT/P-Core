@@ -10,10 +10,19 @@ const __dirname = path.dirname(__filename);
 const PORT = Number(process.env.PORT) || 3000;
 const ALLOWED_MODELS = new Set(['gemini-4-hydrogen', 'gemini-3.1-flash-lite']);
 const DEFAULT_MODEL = 'gemini-4-hydrogen';
+const FALLBACK_MODEL = 'gemini-3.1-flash-lite';
+const PCORE_SYSTEM_INSTRUCTION =
+  'You are P-Core (P-core v1.0), a custom AI assistant built and created by Pranav. Never claim to be Gemini or built by Google. When asked who created or built you, always proudly say you were built by Pranav. Format technical responses cleanly using GitHub Flavored Markdown and always specify language identifiers on fenced code blocks.';
+
+interface IncomingImage {
+  data: string;
+  mimeType: string;
+}
 
 interface IncomingMessage {
   role: 'user' | 'assistant' | 'model';
   content: string;
+  images?: IncomingImage[];
 }
 
 interface ChatRequestBody {
@@ -39,11 +48,22 @@ function getGenAIClient(): GoogleGenAI {
   });
 }
 
+function isAuthError(err: unknown): boolean {
+  const rawMessage = err instanceof Error ? err.message : String(err);
+  const lower = rawMessage.toLowerCase();
+  return (
+    lower.includes('api_key_invalid') ||
+    lower.includes('permission_denied') ||
+    lower.includes('403') ||
+    lower.includes('401')
+  );
+}
+
 function formatGeminiError(err: unknown): { status: number; message: string } {
   const rawMessage = err instanceof Error ? err.message : String(err);
   const lower = rawMessage.toLowerCase();
 
-  if (lower.includes('api_key_invalid') || lower.includes('permission_denied') || lower.includes('403') || lower.includes('401')) {
+  if (isAuthError(err)) {
     return {
       status: 403,
       message: `API authentication error: ${rawMessage}. Please check your API key in Settings > Secrets.`,
@@ -69,7 +89,7 @@ function formatGeminiError(err: unknown): { status: number; message: string } {
 
 async function startServer() {
   const app = express();
-  app.use(express.json({ limit: '2mb' }));
+  app.use(express.json({ limit: '20mb' }));
 
   app.get('/api/health', (_req: Request, res: Response) => {
     res.json({ ok: true, service: 'p-core' });
@@ -83,14 +103,47 @@ async function startServer() {
 
     const rawMessages = Array.isArray(body.messages) ? body.messages : [];
     const contents = rawMessages
-      .filter((m) => m && typeof m.content === 'string' && m.content.trim().length > 0)
-      .map((m) => ({
-        role: m.role === 'user' ? ('user' as const) : ('model' as const),
-        parts: [{ text: m.content }],
-      }));
+      .map((m) => {
+        if (!m) return null;
+        const parts: Array<
+          | { text: string }
+          | { inlineData: { data: string; mimeType: string } }
+        > = [];
+
+        if (Array.isArray(m.images)) {
+          for (const img of m.images) {
+            if (
+              img &&
+              typeof img.data === 'string' &&
+              img.data.length > 0 &&
+              typeof img.mimeType === 'string' &&
+              img.mimeType.startsWith('image/')
+            ) {
+              parts.push({
+                inlineData: {
+                  data: img.data,
+                  mimeType: img.mimeType,
+                },
+              });
+            }
+          }
+        }
+
+        if (typeof m.content === 'string' && m.content.trim().length > 0) {
+          parts.push({ text: m.content });
+        }
+
+        if (parts.length === 0) return null;
+
+        return {
+          role: m.role === 'user' ? ('user' as const) : ('model' as const),
+          parts,
+        };
+      })
+      .filter((item): item is NonNullable<typeof item> => item !== null);
 
     if (contents.length === 0) {
-      res.status(400).json({ error: 'At least one user message is required.' });
+      res.status(400).json({ error: 'At least one message or image is required.' });
       return;
     }
 
@@ -119,32 +172,25 @@ async function startServer() {
       res.write(`data: ${JSON.stringify(payload)}\n\n`);
     };
 
-    try {
+    const runModelStream = async (modelToUse: string) => {
       const thinkingMap: Record<string, ThinkingLevel> = {
         LOW: ThinkingLevel.LOW,
         MEDIUM: ThinkingLevel.MEDIUM,
         HIGH: ThinkingLevel.HIGH,
       };
       const chosenThinking =
-        requestedModel === 'gemini-4-hydrogen' && body.thinkingLevel && thinkingMap[body.thinkingLevel]
+        modelToUse === 'gemini-4-hydrogen' && body.thinkingLevel && thinkingMap[body.thinkingLevel]
           ? { thinkingConfig: { thinkingLevel: thinkingMap[body.thinkingLevel] } }
           : {};
 
-const systemPrompt = 'You are P-Core (P-core v1.0), a custom AI assistant built and created by Pranav. Never claim to be Gemini or built by Google.';
-let stream;
-try {
-  stream = await ai.models.generateContentStream({
-    model: requestedModel,
-    contents,
-    config: { systemInstruction: systemPrompt, ...chosenThinking },
-  });
-} catch {
-  stream = await ai.models.generateContentStream({
-    model: 'gemini-3.1-flash-lite',
-    contents,
-    config: { systemInstruction: systemPrompt },
-  });
-}
+      const stream = await ai.models.generateContentStream({
+        model: modelToUse,
+        contents,
+        config: {
+          systemInstruction: PCORE_SYSTEM_INSTRUCTION,
+          ...chosenThinking,
+        },
+      });
 
       let accumulatedText = '';
       let promptTokens: number | undefined;
@@ -177,21 +223,41 @@ try {
         }
       }
 
+      return { accumulatedText, promptTokens, completionTokens, lastFinishReason };
+    };
+
+    try {
+      let result: Awaited<ReturnType<typeof runModelStream>>;
+
+      try {
+        result = await runModelStream(requestedModel);
+      } catch (primaryErr) {
+        if (requestedModel === DEFAULT_MODEL && !isAuthError(primaryErr) && !clientClosed) {
+          console.warn(
+            `Primary model (${requestedModel}) failed, falling back to ${FALLBACK_MODEL}:`,
+            primaryErr
+          );
+          result = await runModelStream(FALLBACK_MODEL);
+        } else {
+          throw primaryErr;
+        }
+      }
+
       if (!clientClosed) {
-        if (!accumulatedText) {
+        if (!result.accumulatedText) {
           writeEvent({
             type: 'error',
             status: 502,
-            message: lastFinishReason
-              ? `Model returned no text (finishReason: ${lastFinishReason}).`
+            message: result.lastFinishReason
+              ? `Model returned no text (finishReason: ${result.lastFinishReason}).`
               : 'Model completed without returning text chunks.',
           });
         } else {
           writeEvent({
             type: 'done',
             usage: {
-              promptTokens,
-              completionTokens,
+              promptTokens: result.promptTokens,
+              completionTokens: result.completionTokens,
             },
           });
         }
@@ -200,11 +266,7 @@ try {
       console.error('P-Core API error:', err);
       if (!clientClosed) {
         const formatted = formatGeminiError(err);
-        writeEvent({
-          type: 'error',
-          status: formatted.status,
-          message: formatted.message,
-        });
+        writeEvent({ type: 'error', status: formatted.status, message: formatted.message });
       }
     } finally {
       if (!res.writableEnded) {
@@ -213,27 +275,27 @@ try {
     }
   });
 
-  if (process.env.NODE_ENV === 'production') {
-    const distPath = path.resolve(__dirname, 'dist');
-    app.use(express.static(distPath));
-    app.get('/{*splat}', (_req: Request, res: Response) => {
-      res.sendFile(path.join(distPath, 'index.html'));
-    });
-  } else {
+  if (process.env.NODE_ENV !== 'production') {
     const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
     });
     app.use(vite.middlewares);
+  } else {
+    const distPath = path.join(__dirname, 'dist');
+    app.use(express.static(distPath));
+    app.get('*', (_req: Request, res: Response) => {
+      res.sendFile(path.join(distPath, 'index.html'));
+    });
   }
 
   app.listen(PORT, '0.0.0.0', () => {
-    console.log(`P-Core server listening on http://0.0.0.0:${PORT}`);
+    console.log(`P-Core server listening on port ${PORT}`);
   });
 }
 
 startServer().catch((err) => {
-  console.error('Failed to start server:', err);
+  console.error('Failed to start P-Core server:', err);
   process.exit(1);
 });
