@@ -130,16 +130,21 @@ async function startServer() {
           ? { thinkingConfig: { thinkingLevel: thinkingMap[body.thinkingLevel] } }
           : {};
 
-      const stream = await ai.models.generateContentStream({
-        model: requestedModel,
-        contents,
-        config: {
-          systemInstruction:
-            'You are P-Core (P-core v1.0), a custom AI assistant built and created by Pranav. Never claim to be Gemini or built by Google. When asked who created or built you, always proudly say you were built by Pranav. Format technical responses cleanly using GitHub Flavored Markdown.',
-
-          ...chosenThinking,
-        },
-      });
+const systemPrompt = 'You are P-Core (P-core v1.0), a custom AI assistant built and created by Pranav. Never claim to be Gemini or built by Google.';
+let stream;
+try {
+  stream = await ai.models.generateContentStream({
+    model: requestedModel,
+    contents,
+    config: { systemInstruction: systemPrompt, ...chosenThinking },
+  });
+} catch {
+  stream = await ai.models.generateContentStream({
+    model: 'gemini-3.1-flash-lite',
+    contents,
+    config: { systemInstruction: systemPrompt },
+  });
+}
 
       let accumulatedText = '';
       let promptTokens: number | undefined;
