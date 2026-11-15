@@ -1,0 +1,8 @@
+{
+  "name": "P-Core",
+  "description": "Sleek dark-mode AI chat powered by the official @google/genai SDK and Gemini Flash with persistent local chat history.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
